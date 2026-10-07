@@ -17,6 +17,44 @@ use League\Flysystem\WebDAV\WebDAVAdapter;
  */
 class PatchedWebDAVAdapter extends WebDAVAdapter
 {
+    /**
+     * The subfolders of a directory, with how many folders each contains where the
+     * server reports it (Nextcloud: nc:contained-folder-count), in one PROPFIND.
+     *
+     * @param string $path a normalized path, as Filesystem passes to listContents()
+     * @return array<array-key,int|null> path (as listContents() gives it; a numeric
+     *                                   name becomes an int key) => folder count or null
+     */
+    public function listDirectories(string $path): array
+    {
+        $reflection = new ReflectionClass(WebDAVAdapter::class);
+        $prefixer = $reflection->getProperty('prefixer')->getValue($this);
+        $client   = $reflection->getProperty('client')->getValue($this);
+
+        $count    = '{http://nextcloud.org/ns}contained-folder-count';
+        $location = $this->encodePath($prefixer->prefixDirectoryPath($path));
+        $response = $client->propFind($location, array('{DAV:}resourcetype', '{DAV:}iscollection', $count), 1);
+
+        // The directory itself comes first.
+        array_shift($response);
+
+        $folders = array();
+        foreach ($response as $href => $props) {
+            // A folder as Flysystem decides it (WebDAVAdapter::propsIsDirectory()).
+            $type = $props['{DAV:}resourcetype'] ?? null;
+            $isDir = $type instanceof \Sabre\DAV\Xml\Property\ResourceType
+                ? $type->is('{DAV:}collection')
+                : ($props['{DAV:}iscollection'] ?? null) === '1';
+            if (!$isDir) {
+                continue;
+            }
+            $child = $prefixer->stripPrefix((string) parse_url(rawurldecode($href), PHP_URL_PATH));
+            $folders[trim($child, '/')] = isset($props[$count]) && is_numeric($props[$count]) ? (int) $props[$count] : null;
+        }
+
+        return $folders;
+    }
+
     public function createDirectory(string $path, Config $config): void
     {
         $reflection = new ReflectionClass(WebDAVAdapter::class);

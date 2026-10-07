@@ -23,3 +23,10 @@ $config['driver_webdav_password'] = null;
 // Leave null to let curl negotiate.
 $config['driver_curl_http_version'] = null;
 // $config['driver_curl_http_version'] = CURL_HTTP_VERSION_1_1;
+
+// Folder levels the folder tree loads per request (default 2). With 1, the tree needs
+// one request per opened folder instead of one per folder shown. Expand arrows stay
+// exact where the server reports each folder's subfolder count (Nextcloud:
+// nc:contained-folder-count); other servers show an arrow on every folder of the last
+// loaded level until it is opened.
+$config['roundav_tree_depth'] = 2;

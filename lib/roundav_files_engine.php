@@ -2,6 +2,7 @@
 
 use Sabre\DAV\Client;
 use League\Flysystem\Filesystem;
+use League\Flysystem\WhitespacePathNormalizer;
 use League\FlySystem\StorageAttributes;
 require_once __DIR__ . '/PatchedWebDAVAdapter.php';
 class roundav_files_engine
@@ -24,6 +25,11 @@ class roundav_files_engine
      * @var Filesystem
      */
     protected $filesystem;
+
+    /**
+     * @var PatchedWebDAVAdapter|null
+     */
+    protected $adapter;
 
     const API_VERSION = 2;
 
@@ -54,6 +60,7 @@ class roundav_files_engine
         }
 
         $adapter = new PatchedWebDAVAdapter($client, $plugin->rc->config->get('driver_webdav_prefix'));
+        $this->adapter = $adapter;
         $this->filesystem = new Filesystem($adapter);
     }
 
@@ -947,9 +954,10 @@ class roundav_files_engine
      * Handler for "folders list" function
      *
      * Two modes:
-     *  - default (lazy): returns a subtree bounded to `depth` levels (default 3) below the
-     *    `folder` base (default root). Boundary folders at the deepest level get an optimistic
-     *    toggle so the client can lazily request the next batch on expand.
+     *  - default (lazy): returns a subtree bounded to `depth` levels (default: the
+     *    roundav_tree_depth setting, 2) below the `folder` base (default root). Boundary
+     *    folders at the deepest level get the server's subfolder count where it reports one,
+     *    else an optimistic toggle, so the client can lazily request the next batch on expand.
      *  - flat=true: returns the complete recursive list of folder paths (strings). Only used by
      *    the "search all folders" / collection features, which must scan the whole tree.
      */
@@ -993,7 +1001,11 @@ class roundav_files_engine
         // Bounded, lazy subtree listing.
         $depth = (int) rcube_utils::get_input_value('depth', rcube_utils::INPUT_GET);
         if ($depth <= 0) {
-            $depth = 2;
+            // Levels per request; see roundav_tree_depth in config.inc.php.dist.
+            $depth = (int) $plugin->rc->config->get('roundav_tree_depth', 2);
+            if ($depth <= 0) {
+                $depth = 2;
+            }
         }
 
         $folderParam = rcube_utils::get_input_value('folder', rcube_utils::INPUT_GET);
@@ -1101,19 +1113,22 @@ class roundav_files_engine
             list($dir, $level) = array_shift($queue);
             $isBoundary = $level >= $depthLimit;
 
-            $children = $this->filesystem->listContents($dir, false)
-                ->filter(fn (StorageAttributes $attributes) => $attributes->isDir());
+            // Subfolders with their own subfolder counts, where the server reports them
+            // (path => int|null), in one PROPFIND. The path is normalized (no "..") as
+            // Filesystem::listContents() does before it reaches the adapter.
+            $children = $this->adapter->listDirectories((new WhitespacePathNormalizer())->normalizePath($dir));
 
-            // Decode once up front: listContents() hands back URL-encoded paths but expects
-            // decoded ones (same as action_file_list()), and sorting needs the decoded names.
+            // Decode as before (same as action_file_list()); sorting needs the decoded names.
             $decoded = array();
-            foreach ($children as $child) {
-                $decoded[] = urldecode($child->path());
+            $counts  = array();
+            foreach ($children as $childPath => $count) {
+                $decoded[] = urldecode($childPath);
+                $counts[urldecode($childPath)] = $count;
             }
 
             // Sorting each batch is enough: the BFS is level-order (so parents still come
             // before children) and the client appends every row into its own parent's
-            // <ul.subfolders>, so only the order *within* one listContents() call is visible.
+            // <ul.subfolders>, so only the order *within* one directory's listing is visible.
             $ranks = $this->name_ranks(array_map('basename', $decoded));
             usort($decoded, fn ($a, $b) => $ranks[basename($a)] <=> $ranks[basename($b)]);
 
@@ -1123,7 +1138,9 @@ class roundav_files_engine
                 $entries[$displayPath] = array(
                     'path'         => $displayPath,
                     'depth'        => $baseDepth + $level,
-                    'has_children' => $isBoundary, // optimistic for boundary; corrected below otherwise
+                    // Boundary: the server's count if it gave one, else optimistic.
+                    // Interior nodes are corrected below.
+                    'has_children' => $isBoundary && ($counts[$path] ?? 1) > 0,
                     'boundary'     => $isBoundary,
                 );
 
