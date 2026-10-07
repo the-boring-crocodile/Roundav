@@ -23,3 +23,13 @@ Installing through Composer enforces this automatically; copying the folder by h
 1. Place this plugin folder into plugins directory of Roundcube.
 1. Run `composer install --no-dev` inside this folder.
 1. Add `roundav` to `$config['plugins']` in your Roundcube config.
+
+Plugin hooks
+------------
+
+`roundav_client` runs whenever Roundav builds its WebDAV client. Arguments:
+`settings` (the `Sabre\DAV\Client` settings Roundav is about to use) and
+`client` (`null`). Another plugin may change `settings` (for example the
+authentication type) or return its own `Sabre\DAV\Client` in `client`, which
+Roundav then uses instead, e.g. one that keeps the server's session cookie
+between requests. `driver_curl_http_version` applies to either client.

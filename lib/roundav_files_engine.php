@@ -46,7 +46,14 @@ class roundav_files_engine
             'password' => $plugin->rc->config->get('driver_webdav_password') ?: $plugin->rc->get_user_password(),
         );
 
-        $client = new Client($settings);
+        // Lets another plugin adjust the WebDAV client's settings (authentication
+        // type, ...) or supply a Sabre\DAV\Client of its own, e.g. one that keeps
+        // the server's session cookie across requests.
+        $args = $plugin->rc->plugins->exec_hook('roundav_client', array(
+            'settings' => $settings,
+            'client'   => null,
+        ));
+        $client = ($args['client'] ?? null) instanceof Client ? $args['client'] : new Client($args['settings']);
 
         $curl_http_version = $plugin->rc->config->get('driver_curl_http_version');
         if ($curl_http_version !== null) {
