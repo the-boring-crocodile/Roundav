@@ -2,6 +2,7 @@
 
 use Sabre\DAV\Client;
 use League\Flysystem\Filesystem;
+use League\Flysystem\WhitespacePathNormalizer;
 use League\FlySystem\StorageAttributes;
 require_once __DIR__ . '/PatchedWebDAVAdapter.php';
 class roundav_files_engine
@@ -25,6 +26,19 @@ class roundav_files_engine
      * @var Filesystem
      */
     protected $filesystem;
+
+    /**
+     * @var PatchedWebDAVAdapter|null
+     */
+    protected $adapter;
+
+    /**
+     * WebDAV property holding a folder's number of subfolders (roundav_folder_count_property),
+     * or null: not asked.
+     *
+     * @var string|null
+     */
+    protected $folder_count_property;
 
     const API_VERSION = 2;
 
@@ -64,6 +78,9 @@ class roundav_files_engine
         }
 
         $adapter = new PatchedWebDAVAdapter($client, $plugin->rc->config->get('driver_webdav_prefix'));
+        $this->adapter = $adapter;
+        $count_property = $plugin->rc->config->get('roundav_folder_count_property');
+        $this->folder_count_property = is_string($count_property) && $count_property !== '' ? $count_property : null;
         $this->filesystem = new Filesystem($adapter);
     }
 
@@ -1024,9 +1041,11 @@ class roundav_files_engine
      * Handler for "folders list" function
      *
      * Two modes:
-     *  - default (lazy): returns a subtree bounded to `depth` levels (default: the roundav_tree_depth setting, 2) below the
-     *    `folder` base (default root). Boundary folders at the deepest level get an optimistic
-     *    toggle so the client can lazily request the next batch on expand.
+     *  - default (lazy): returns a subtree bounded to `depth` levels (default: the
+     *    roundav_tree_depth setting, 2) below the `folder` base (default root). Boundary
+     *    folders at the deepest level get a toggle from their subfolder count where the server
+     *    reports one (roundav_folder_count_property), else an optimistic one, so the client
+     *    can lazily request the next batch on expand.
      *  - flat=true: returns the complete recursive list of folder paths (strings). Only used by
      *    the "search all folders" / collection features, which must scan the whole tree.
      */
@@ -1182,19 +1201,34 @@ class roundav_files_engine
             list($dir, $level) = array_shift($queue);
             $isBoundary = $level >= $depthLimit;
 
-            $children = $this->filesystem->listContents($dir, false)
-                ->filter(fn (StorageAttributes $attributes) => $attributes->isDir());
+            // Subfolders (path => subfolder count, or null when unknown). With
+            // roundav_folder_count_property set, the counts come in the same PROPFIND; the
+            // path is normalized (no "..") as Filesystem::listContents() does before it
+            // reaches the adapter. Both return decoded paths: decoding again would turn "+"
+            // into a space and "%41" into "A".
+            if ($this->folder_count_property !== null) {
+                $children = $this->adapter->listDirectories(
+                    (new WhitespacePathNormalizer())->normalizePath($dir), $this->folder_count_property);
+            }
+            else {
+                $children = array();
+                $listing = $this->filesystem->listContents($dir, false)
+                    ->filter(fn (StorageAttributes $attributes) => $attributes->isDir());
+                foreach ($listing as $child) {
+                    $children[$child->path()] = null;
+                }
+            }
 
-            // listContents() already returns decoded paths: decoding again would turn "+" into
-            // a space and "%41" into "A".
             $decoded = array();
-            foreach ($children as $child) {
-                $decoded[] = $child->path();
+            $counts  = array();
+            foreach ($children as $childPath => $count) {
+                $decoded[] = (string) $childPath;
+                $counts[(string) $childPath] = $count;
             }
 
             // Sorting each batch is enough: the BFS is level-order (so parents still come
             // before children) and the client appends every row into its own parent's
-            // <ul.subfolders>, so only the order *within* one listContents() call is visible.
+            // <ul.subfolders>, so only the order *within* one directory's listing is visible.
             $ranks = $this->name_ranks(array_map('basename', $decoded));
             usort($decoded, fn ($a, $b) => $ranks[basename($a)] <=> $ranks[basename($b)]);
 
@@ -1204,7 +1238,9 @@ class roundav_files_engine
                 $entries[$displayPath] = array(
                     'path'         => $displayPath,
                     'depth'        => $baseDepth + $level,
-                    'has_children' => $isBoundary, // optimistic for boundary; corrected below otherwise
+                    // Boundary: the server's count if it gave one, else optimistic.
+                    // Interior nodes are corrected below.
+                    'has_children' => $isBoundary && ($counts[$path] ?? 1) > 0,
                     'boundary'     => $isBoundary,
                 );
 

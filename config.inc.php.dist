@@ -50,3 +50,11 @@ $config['roundav_search_threads'] = 1;
 
 // Folder levels the folder tree loads per request (default 2).
 $config['roundav_tree_depth'] = 2;
+
+// WebDAV property holding a folder's number of subfolders, asked for in the same PROPFIND
+// as the folder listing: a folder of the last loaded level without subfolders then shows
+// no expand arrow. null (default): not asked; every folder of the last loaded level gets
+// an arrow until it is opened.
+$config['roundav_folder_count_property'] = null;
+// Nextcloud:
+// $config['roundav_folder_count_property'] = '{http://nextcloud.org/ns}contained-folder-count';
